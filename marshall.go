@@ -6,10 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jmoiron/sqlx"
+	"github.com/jmoiron/sqlx/reflectx"
 )
+
+//ErrBadTableName used in case of illegal characters in the table definition in GetTableLength
+var ErrBadTableName = errors.New("The table name inputted does not contain legal characters")
 
 var errNilPtr = errors.New("destination pointer is nil") // embedded in descriptive error
 
@@ -325,6 +332,260 @@ func Marshall(source interface{}, dest interface{}) error {
 	}
 	return nil
 }
+
+// Query executes a query on the database for a single record into a database template and then
+// marshalls the result into a data interface.
+// If no records are found for the query, sql.ErrNoRows is returned
+//
+func Query(db *sqlx.DB, query string, dbTemplate interface{}, data interface{}, args ...interface{}) (err error) {
+	var rows *sqlx.Rows
+	rows, err = db.Queryx(query, args...)
+	if err != nil {
+		return
+	}
+	// Close off the rows when we are done (since we may not have read to the end of the list)
+	defer rows.Close()
+	// If we didn't get any rows, let them know
+	if !rows.Next() {
+		err = sql.ErrNoRows
+	}
+	if err == nil {
+		// Scan only the first result into our database template
+		err = rows.StructScan(dbTemplate)
+		if err == nil {
+			// If that works, then UnMarshall the results into the program template
+			err = UnMarshall(dbTemplate, data)
+		}
+	}
+	return
+}
+
+// VerifySQLTableName checks for potential SQL injection errors by confirming that the
+// table name does not contain anything but alpha numeric and underscore characters
+//
+func VerifySQLTableName(tableName string) (err error) {
+	err = nil
+	// The name of the table that they are going to use must not have anything that
+	// could cause a SQL Injection error
+	tableRegex := regexp.MustCompile(`^[A-Za-z0-9_\.]+$`)
+	if !tableRegex.MatchString(tableName) {
+		err = ErrBadTableName
+	}
+	return
+}
+
+// InsertRecord allows you to insert a new record into a table respecting nulls
+func InsertRecord(db *sqlx.DB, tableName string, record interface{}) (sql.Result, error) {
+	// First check for any potential SQL Injection
+	err := VerifySQLTableName(tableName)
+	if err != nil {
+		return nil, err
+	}
+	sqlStr := "INSERT INTO " + tableName + " ("
+	valStr := ""
+	extra := ""
+	args := []interface{}{}
+
+	// We need both the Value (for the source values) and the Type (to get structure and annotations) of the source.
+	recordValue := reflect.Indirect(reflect.ValueOf(record))
+	recordType := recordValue.Type()
+	// Sanity check to make sure we are working with structures
+	if recordType.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("record is not a struct")
+	}
+
+	// Use the standard mapper that pulls out the database mappings based on the db annotations in the structure
+	mapper := db.Mapper
+	typemap := mapper.TypeMap(recordValue.Type())
+	topLevel := typemap.Tree
+
+	// Iterate through all the members of the structure.
+	for _, fieldInfo := range topLevel.Children {
+		if fieldInfo == nil {
+			continue
+		}
+		addfield := false
+		field := fieldInfo.Name
+		// See if this field is an autoincrement field.  If so, we just ignore and don't add it
+		_, hasAI := fieldInfo.Options["ai"]
+		if hasAI {
+			continue
+		}
+		// Get the value for this field
+		val := reflectx.FieldByIndexes(recordValue, fieldInfo.Index)
+
+		// Check to see if we are dealing with one of the SQL null structures
+		if val.Kind() == reflect.Struct {
+			fieldInterface := val.Interface()
+			switch fieldInterface.(type) {
+			case sql.NullString:
+				if fieldInterface.(sql.NullString).Valid {
+					addfield = true
+					val = reflect.ValueOf(fieldInterface.(sql.NullString).String)
+				}
+			case sql.NullInt64:
+				if fieldInterface.(sql.NullInt64).Valid {
+					addfield = true
+					val = reflect.ValueOf(fieldInterface.(sql.NullInt64).Int64)
+				}
+			case sql.NullFloat64:
+				if fieldInterface.(sql.NullFloat64).Valid {
+					addfield = true
+					val = reflect.ValueOf(fieldInterface.(sql.NullFloat64).Float64)
+				}
+			default:
+				addfield = true
+			}
+		} else {
+			addfield = true
+		}
+		// If this is a field we know how to handle with the database, then we can add it to the list of fields in the SQL
+		if addfield {
+			sqlStr = sqlStr + extra + field
+			valStr = valStr + extra + "?"
+			extra = ","
+			args = append(args, val.Interface())
+		}
+	}
+	// If we get here and the extra flag is not blank was set, it indicates that we had added at least one field to the
+	// structure to save.  We can no generate the query and execute it.
+	if len(extra) > 0 {
+		sqlStr = sqlStr + ") VALUES (" + valStr + ")"
+		return db.Exec(sqlStr, args...)
+	}
+	// Apparently we had nothing to do, so just return quietly
+	return nil, nil
+}
+
+// UpdateRecord allows you to update an existing record in the database
+func UpdateRecord(db *sqlx.DB, tableName string, record interface{}) (sql.Result, error) {
+	// First check for any potential SQL Injection
+	err := VerifySQLTableName(tableName)
+	if err != nil {
+		return nil, err
+	}
+	sqlStr := "UPDATE " + tableName + " SET "
+	extra := ""
+	where := ""
+	var whereval interface{}
+	args := []interface{}{}
+
+	// We need both the Value (for the source values) and the Type (to get structure and annotations) of the source.
+	recordValue := reflect.Indirect(reflect.ValueOf(record))
+	recordType := recordValue.Type()
+	// Sanity check to make sure we are working with structures
+	if recordType.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("record is not a struct")
+	}
+
+	// Use the standard mapper that pulls out the database mappings based on the db annotations in the structure
+	mapper := db.Mapper
+	typemap := mapper.TypeMap(recordValue.Type())
+	topLevel := typemap.Tree
+
+	// Iterate through all the top level fields in the structure
+	for _, fieldInfo := range topLevel.Children {
+		if fieldInfo == nil {
+			continue
+		}
+		addfield := false
+		field := fieldInfo.Name
+
+		val := reflectx.FieldByIndexes(recordValue, fieldInfo.Index)
+		if val.Kind() == reflect.Struct {
+			fieldInterface := val.Interface()
+			switch fieldInterface.(type) {
+			case sql.NullString:
+				if fieldInterface.(sql.NullString).Valid {
+					addfield = true
+					val = reflect.ValueOf(fieldInterface.(sql.NullString).String)
+				}
+			case sql.NullInt64:
+				if fieldInterface.(sql.NullInt64).Valid {
+					addfield = true
+					val = reflect.ValueOf(fieldInterface.(sql.NullInt64).Int64)
+				}
+			case sql.NullFloat64:
+				if fieldInterface.(sql.NullFloat64).Valid {
+					addfield = true
+					val = reflect.ValueOf(fieldInterface.(sql.NullFloat64).Float64)
+				}
+			default:
+				addfield = true
+			}
+		} else {
+			addfield = true
+		}
+		// See if this field is an autoincrement field.  If so, then it is the key we are matching on
+		_, hasAI := fieldInfo.Options["ai"]
+		if hasAI {
+			where = " WHERE " + field + "=?"
+			whereval = val.Interface()
+			// If this is a field we know how to handle with the database, then we can add it to the list of fields in the SQL
+		} else if addfield {
+			sqlStr = sqlStr + extra + field + "=?"
+			extra = ","
+			args = append(args, val.Interface())
+		}
+	}
+	// If we get here and the extra flag is not blank was set, it indicates that we had added at least one field to the
+	// structure to save.  We can no generate the query and execute it.
+	if len(extra) > 0 {
+		sqlStr = sqlStr + where
+		args = append(args, whereval)
+		return db.Exec(sqlStr, args...)
+	}
+	// Apparently we had nothing to do, so just return quietly
+	return nil, nil
+}
+
+// MarshallInsertRecord inserts a record of any type into the database and returns the insertId from
+// that record if it succeeds or any errors if it fails
+// For the dbTemplate you must pass in an empty structure by address to allow the data to be marshalled
+//
+func MarshallInsertRecord(db *sqlx.DB, table string, data interface{}, dbTemplate interface{}) (resID int64, err error) {
+	// Default id returned is -1
+	resID = int64(0)
+	// Convert the data to a format the database likes
+	err = Marshall(data, dbTemplate)
+	if err != nil {
+		return
+	}
+	// Attempt to insert into the database
+	var res sql.Result
+	res, err = InsertRecord(db, table, dbTemplate)
+	if err != nil {
+		return
+	}
+	// If we succeeded, get the id of the last inserted record
+	resID, err = res.LastInsertId()
+	return
+}
+
+// MarshallUpdateRecord finds the record based on the table name and the autoIncrementing key.  NOTE: Whatever structure
+// is inserted into the table, the incrementing key must be the ONLY incrementing key in the table and it must be the same
+// as the record you are hoping to update
+//
+func MarshallUpdateRecord(db *sqlx.DB, table string, data interface{}, dbTemplate interface{}) (resID int64, err error) {
+	// Default id returned is -1
+	resID = int64(0)
+	// Convert the data to a format the database likes
+	err = Marshall(data, dbTemplate)
+	if err != nil {
+		return
+	}
+	// Attempt to insert into the database
+	var res sql.Result
+	res, err = UpdateRecord(db, table, dbTemplate)
+	if err != nil {
+		return
+	}
+	// If we succeeded, get the id of the last inserted record
+	resID, err = res.LastInsertId()
+	return
+}
+
+//***************************************************************************************
 
 //
 // CopyInterface is a copy of convertAssign from the sql package
