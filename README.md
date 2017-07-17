@@ -1,2 +1,2 @@
 # go-sqlmarshall
-Marshall/UnMarshall routines for using sql with GO
+Marshall/UnMarshall routines for using sqlx with GO
