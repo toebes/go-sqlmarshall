@@ -340,9 +340,6 @@ func Marshall(source interface{}, dest interface{}) error {
 func Query(db *sqlx.DB, query string, dbTemplate interface{}, data interface{}, args ...interface{}) (err error) {
 	var rows *sqlx.Rows
 	rows, err = db.Queryx(query, args...)
-	if err != nil {
-		return
-	}
 	// Close off the rows when we are done (since we may not have read to the end of the list)
 	defer rows.Close()
 	// If we didn't get any rows, let them know
