@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // Company structure is all the data for a company.  It is a paremeter
@@ -271,6 +273,63 @@ func Test_asBytes(t *testing.T) {
 			}
 			if gotOk != tt.wantOk {
 				t.Errorf("asBytes() gotOk = %v, want %v", gotOk, tt.wantOk)
+			}
+		})
+	}
+}
+
+func TestInsertRecord(t *testing.T) {
+	type args struct {
+		db        *sqlx.DB
+		tableName string
+		record    interface{}
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    sql.Result
+		wantErr bool
+	}{
+	// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := InsertRecord(tt.args.db, tt.args.tableName, tt.args.record)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("InsertRecord() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("InsertRecord() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMarshallInsertRecord(t *testing.T) {
+	type args struct {
+		db         *sqlx.DB
+		table      string
+		data       interface{}
+		dbTemplate interface{}
+	}
+	tests := []struct {
+		name      string
+		args      args
+		wantResID int64
+		wantErr   bool
+	}{
+	// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotResID, err := MarshallInsertRecord(tt.args.db, tt.args.table, tt.args.data, tt.args.dbTemplate)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("MarshallInsertRecord() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if gotResID != tt.wantResID {
+				t.Errorf("MarshallInsertRecord() = %v, want %v", gotResID, tt.wantResID)
 			}
 		})
 	}
