@@ -518,6 +518,11 @@ func UpdateRecord(db *sqlx.DB, tableName string, record interface{}) (sql.Result
 		}
 		// See if this field is an autoincrement field.  If so, then it is the key we are matching on
 		_, hasAI := fieldInfo.Options["ai"]
+		_, hasRO := fieldInfo.Options["ro"]
+		// If this is a read only field, don't update it in the database
+		if hasRO {
+			addfield = false
+		}
 		if hasAI {
 			where = " WHERE " + field + "=?"
 			whereval = val.Interface()
